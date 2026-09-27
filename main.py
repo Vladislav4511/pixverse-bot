@@ -6,7 +6,7 @@ from aiogram.types import Message
 from aiogram.filters import CommandStart, Command
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-PIXVERSE_API_KEY = os.getenv("PIXVERSE_API_KEY")
+FAL_KEY = os.getenv("PIXVERSE_API_KEY")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -14,10 +14,10 @@ dp = Dispatcher()
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     await message.answer(
-        "👋 **Привет! Я бот для генерации видео через PixVerse.**\n\n"
+        "👋 **Привет! Я бот для генерации видео через Fal.ai (PixVerse).**\n\n"
         "🎬 **Как генерировать:**\n"
         "1. **Только текст:** `/video твой промпт на английском`\n"
-        "2. **С картинкой:** прикрепи 1 фото и напиши описание в подписи к нему!",
+        "2. **С картинкой:** прикрепи photo и напиши описание в подписи!",
         parse_mode="Markdown"
     )
 
@@ -25,84 +25,59 @@ async def cmd_start(message: Message):
 async def generate_from_text(message: Message):
     prompt = message.text.replace("/video", "").strip()
     if not prompt:
-        await message.answer("⚠️ Напиши описание на английском после команды! Пример:\n`/video Boy running and eating ice cream`", parse_mode="Markdown")
+        await message.answer("⚠️ Напиши описание на английском! Пример:\n`/video Boy running and eating ice cream`", parse_mode="Markdown")
         return
 
-    await process_video_generation(
+    await process_fal_generation(
         message=message, 
-        prompt=prompt, 
-        endpoint="https://api.pixverse.ai/v1/video/generate", # Обновленный эндпоинт API
-        payload_extra={}
+        endpoint="https://fal.run/fal-ai/pixverse/v3/text-to-video",
+        payload={"prompt": prompt, "resolution": "480p", "duration": 7}
     )
 
 @dp.message(F.photo)
 async def generate_from_image(message: Message):
     prompt = message.caption
     if not prompt:
-        await message.answer("⚠️ Пожалуйста, добавь описание на английском в подпись к фото!")
+        await message.answer("⚠️ Добавь описание на английском в подпись к фото!")
         return
 
     photo = message.photo[-1]
     file_info = await bot.get_file(photo.file_id)
     photo_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
 
-    await process_video_generation(
+    await process_fal_generation(
         message=message, 
-        prompt=prompt, 
-        endpoint="https://api.pixverse.ai/v1/image-to-video/generate",
-        payload_extra={"image_url": photo_url}
+        endpoint="https://fal.run/fal-ai/pixverse/v3/image-to-video",
+        payload={"prompt": prompt, "image_url": photo_url, "resolution": "480p", "duration": 7}
     )
 
-async def process_video_generation(message: Message, prompt: str, endpoint: str, payload_extra: dict):
-    msg = await message.answer("🎬 Отправляю запрос... Жди 1-2 минуты.")
+async def process_fal_generation(message: Message, endpoint: str, payload: dict):
+    msg = await message.answer("🎬 Запрос отправлен! Генерирую видео. Жди 1-2 минуты...")
 
     headers = {
-        "Authorization": f"Bearer {PIXVERSE_API_KEY}",
+        "Authorization": f"Key {FAL_KEY}",
         "Content-Type": "application/json"
     }
-
-    payload = {
-        "prompt": prompt,
-        "resolution": "480p",
-        "duration": 7,
-        "model": "v6"
-    }
-    payload.update(payload_extra)
 
     async with aiohttp.ClientSession() as session:
         try:
             async with session.post(endpoint, json=payload, headers=headers) as resp:
                 if resp.status != 200:
-                    text = await resp.text()
-                    await msg.edit_text(f"❌ Ошибка API ({resp.status}). Проверь API-ключ или ссылку.")
+                    err_text = await resp.text()
+                    await msg.edit_text(f"❌ Ошибка API ({resp.status}). Проверь ключ Fal.ai.")
                     return
                 
                 data = await resp.json()
-                video_id = data.get("video_id") or data.get("data", {}).get("video_id")
+                video_url = data.get("video", {}).get("url") or data.get("video_url")
+                
+                if video_url:
+                    await msg.delete()
+                    await message.answer_video(video=video_url, caption="✨ **Готово!**")
+                else:
+                    await msg.edit_text("❌ Ошибка: Не удалось получить видео.")
 
-            if not video_id:
-                await msg.edit_text("❌ Не удалось получить ID видео от сервиса.")
-                return
-
-            for _ in range(18):
-                await asyncio.sleep(10)
-                async with session.get(f"https://api.pixverse.ai/v1/video/result/{video_id}", headers=headers) as check_resp:
-                    if check_resp.status == 200:
-                        res_data = await check_resp.json()
-                        status = res_data.get("status") or res_data.get("data", {}).get("status")
-                        
-                        if status == "success":
-                            video_url = res_data.get("url") or res_data.get("data", {}).get("url")
-                            await msg.delete()
-                            await message.answer_video(video=video_url, caption=f"✨ **Готово!**\nПромпт: `{prompt}`", parse_mode="Markdown")
-                            return
-                        elif status == "failed":
-                            await msg.edit_text("❌ Ошибка генерации видео.")
-                            return
-
-            await msg.edit_text("⏳ Время ожидания истекло.")
         except Exception as e:
-            await msg.edit_text(f"⚠️ Произошла ошибка: {str(e)}")
+            await msg.edit_text(f"⚠️ Ошибка: {str(e)}")
 
 async def main():
     await dp.start_polling(bot)
